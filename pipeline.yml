@@ -1,0 +1,80 @@
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  azureSubscription: 'AzureSubscriptionxxxxxx'
+  resourceGroupName: 'StaticWebsiteResourceGroup'
+  location: 'southuk'
+  storageAccountName: 'mystaticwebsite123' 
+  cdnProfileName: 'cdnprofile'
+  artifactsFolder: '$(Build.ArtifactStagingDirectory)/site'
+
+stages:
+- stage: DeployInfrastructure
+  displayName: 'Deploy Infrastructure'
+  jobs:
+  - job: DeployBicep
+    displayName: 'Deploy Bicep Template'
+    steps:
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az deployment group create \
+            --resource-group $(resourceGroupName) \
+            --template-file main.bicep \
+            --parameters storageAccountName=$(storageAccountName) cdnProfileName=$(cdnProfileName) location=$(location)
+        addSpnToEnvironment: true
+
+- stage: DeployWebsite
+  displayName: 'Deploy Static Website'
+  dependsOn: DeployInfrastructure
+  jobs:
+  - job: UploadFiles
+    displayName: 'Upload Files to Storage Account'
+    steps:
+    - task: CopyFiles@2
+      inputs:
+        contents: 'site/**'
+        targetFolder: $(artifactsFolder)
+        cleanTargetFolder: true
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        pathToPublish: $(artifactsFolder)
+        artifactName: 'static-site'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az storage blob upload-batch \
+            --account-name $(storageAccountName) \
+            --source $(Pipeline.Workspace)/static-site \
+            --destination '$web' \
+            --pattern '*'
+        addSpnToEnvironment: true
+
+  - job: PurgeCDN
+    displayName: 'Purge CDN Cache'
+    dependsOn: UploadFiles
+    steps:
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az cdn endpoint purge \
+            --profile-name $(cdnProfileName) \
+            --name ${cdnProfileName}-endpoint \
+            --resource-group $(resourceGroupName) \
+            --content-paths '/*'
+        addSpnToEnvironment: true
